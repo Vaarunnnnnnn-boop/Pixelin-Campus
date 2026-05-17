@@ -1,0 +1,311 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = "file:./dev.db"
+}
+
+enum UserRole {
+  STUDENT
+  FACULTY
+  ADMIN
+}
+
+enum AttendanceStatus {
+  PRESENT
+  ABSENT
+}
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  name         String
+  role         UserRole
+  passwordHash String
+
+  createdAt DateTime @default(now())
+
+  // Existing Relations
+  sessions    Session[]
+  enrollments Enrollment[]
+  assignments FacultyAssignment[]
+
+  timetableAsFaculty TimetableEntry[] @relation("FacultyTimetable")
+
+  attendanceSessions AttendanceSession[] @relation("FacultySessions")
+
+  attendanceRecords AttendanceRecord[]
+
+  // Leave + Manual Attendance
+  leaveApplications LeaveApplication[] @relation("StudentLeaves")
+
+  studentAttendance Attendance[] @relation("StudentAttendance")
+}
+
+model Session {
+  id        String   @id @default(cuid())
+  userId    String
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+}
+
+model Building {
+  id        String   @id @default(cuid())
+  name      String   @unique
+  headName  String?
+  address   String?
+  createdAt DateTime @default(now())
+
+  departments Department[]
+  rooms       Room[]
+}
+
+model Department {
+  id         String   @id @default(cuid())
+  buildingId String
+  name       String
+  hodName    String?
+  createdAt  DateTime @default(now())
+
+  building Building @relation(fields: [buildingId], references: [id])
+
+  sections Section[]
+  subjects Subject[]
+  rooms    Room[]
+
+  @@unique([buildingId, name])
+}
+
+model Room {
+  id           String   @id @default(cuid())
+  buildingId   String
+  departmentId String?
+  name         String
+  label        String?
+  createdAt    DateTime @default(now())
+
+  building Building @relation(fields: [buildingId], references: [id])
+
+  department Department? @relation(fields: [departmentId], references: [id])
+
+  timetableEntries TimetableEntry[]
+
+  @@unique([buildingId, name])
+  @@index([departmentId])
+}
+
+model Section {
+  id           String   @id @default(cuid())
+  departmentId String
+  name         String
+  createdAt    DateTime @default(now())
+
+  department Department @relation(fields: [departmentId], references: [id])
+
+  enrollments Enrollment[]
+
+  assignments FacultyAssignment[]
+
+  timetable TimetableEntry[]
+
+  sessions AttendanceSession[]
+
+  @@unique([departmentId, name])
+}
+
+model Subject {
+  id           String   @id @default(cuid())
+  departmentId String
+  code         String
+  name         String
+  createdAt    DateTime @default(now())
+
+  department Department @relation(fields: [departmentId], references: [id])
+
+  assignments FacultyAssignment[]
+
+  timetable TimetableEntry[]
+
+  sessions AttendanceSession[]
+
+  @@unique([departmentId, code])
+}
+
+model Enrollment {
+  id String @id @default(cuid())
+
+  sectionId String
+
+  studentId String
+
+  section Section @relation(fields: [sectionId], references: [id])
+
+  student User @relation(fields: [studentId], references: [id])
+
+  @@unique([sectionId, studentId])
+}
+
+model FacultyAssignment {
+  id String @id @default(cuid())
+
+  sectionId String
+
+  subjectId String
+
+  facultyId String
+
+  section Section @relation(fields: [sectionId], references: [id])
+
+  subject Subject @relation(fields: [subjectId], references: [id])
+
+  faculty User @relation(fields: [facultyId], references: [id])
+
+  @@unique([sectionId, subjectId, facultyId])
+}
+
+model TimetableEntry {
+  id String @id @default(cuid())
+
+  sectionId String
+
+  subjectId String
+
+  facultyId String
+
+  roomId String
+
+  dayOfWeek Int
+
+  startTime String
+
+  endTime String
+
+  createdAt DateTime @default(now())
+
+  section Section @relation(fields: [sectionId], references: [id])
+
+  subject Subject @relation(fields: [subjectId], references: [id])
+
+  room Room @relation(fields: [roomId], references: [id])
+
+  faculty User @relation("FacultyTimetable", fields: [facultyId], references: [id])
+
+  @@index([sectionId, dayOfWeek])
+  @@index([facultyId, dayOfWeek])
+}
+
+model AttendanceSession {
+  id String @id @default(cuid())
+
+  sectionId String
+
+  subjectId String
+
+  facultyId String
+
+  date DateTime
+
+  createdAt DateTime @default(now())
+
+  section Section @relation(fields: [sectionId], references: [id])
+
+  subject Subject @relation(fields: [subjectId], references: [id])
+
+  faculty User @relation("FacultySessions", fields: [facultyId], references: [id])
+
+  records AttendanceRecord[]
+
+  @@unique([sectionId, subjectId, date])
+}
+
+model AttendanceRecord {
+  id String @id @default(cuid())
+
+  sessionId String
+
+  studentId String
+
+  status AttendanceStatus
+
+  markedAt DateTime @default(now())
+
+  session AttendanceSession @relation(fields: [sessionId], references: [id])
+
+  student User @relation(fields: [studentId], references: [id])
+
+  @@unique([sessionId, studentId])
+}
+
+model Event {
+  id String @id @default(cuid())
+
+  title String
+
+  details String?
+
+  description String?
+
+  poster String?
+
+  location String?
+
+  startsAt DateTime
+
+  createdAt DateTime @default(now())
+}
+
+model LeaveApplication {
+  id String @id @default(cuid())
+
+  studentId String
+
+  student User @relation("StudentLeaves", fields: [studentId], references: [id])
+
+  title String
+
+  description String?
+
+  enrollmentNo String
+
+  studentName String
+
+  department String
+
+  medicalFile String?
+
+  requestedDays Int
+
+  approvedDays Int?
+
+  startDate DateTime
+
+  status String @default("PENDING")
+
+  createdAt DateTime @default(now())
+}
+
+model Attendance {
+  id String @id @default(cuid())
+
+  studentId String
+
+  student User @relation("StudentAttendance", fields: [studentId], references: [id])
+
+  facultyId String?
+
+  subject String?
+
+  date DateTime
+
+  status String
+
+  createdAt DateTime @default(now())
+
+  @@unique([studentId, date])
+}

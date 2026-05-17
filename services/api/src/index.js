@@ -20,8 +20,11 @@ const groq = new OpenAI({
   baseURL: "https://api.groq.com/openai/v1"
 });
 
-await app.register(cors, {
-  origin: true,
+app.register(cors, {
+  origin: [
+    "http://localhost:3000",
+    "https://pixelin-campus-web.vercel.app/"
+  ],
   credentials: true
 });
 

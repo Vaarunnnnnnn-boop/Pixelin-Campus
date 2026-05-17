@@ -23,7 +23,7 @@ const groq = new OpenAI({
 app.register(cors, {
   origin: [
     "http://localhost:3000",
-    "https://pixelin-campus-web.vercel.app/"
+    "https://pixelin-campus-web.vercel.app"
   ],
   credentials: true
 });
@@ -1015,10 +1015,11 @@ app.post("/auth/login", async (req, reply) => {
   const session = await prisma.session.create({ data: { userId: user.id, expiresAt } });
 
   reply.setCookie(SESSION_COOKIE, session.id, {
-    path: "/",
-    httpOnly: true,
-    sameSite: "lax"
-  });
+  path: "/",
+  httpOnly: true,
+  secure: true,
+  sameSite: "none"
+});
 
   return { data: { id: user.id, name: user.name, role: user.role, email: user.email } };
 });

@@ -20,7 +20,8 @@ const groq = new OpenAI({
   baseURL: "https://api.groq.com/openai/v1"
 });
 
-app.register(cors, {
+// IMPORTANT: await register (Fastify best practice)
+await app.register(cors, {
   origin: [
     "http://localhost:3000",
     "https://pixelin-campus-web.vercel.app"
@@ -29,11 +30,10 @@ app.register(cors, {
 });
 
 await app.register(cookie, {
-  secret: "pixelin-dev-secret-change-me"
+  secret: process.env.COOKIE_SECRET || "pixelin-dev-secret-change-me"
 });
 
 await app.register(multipart);
-
 
 const SESSION_COOKIE = "pixelin_session";
 
@@ -45,6 +45,11 @@ function normalizeEmail(email) {
 function toUtcDateOnly(yyyyMmDd) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(yyyyMmDd)) throw new Error("date must be YYYY-MM-DD");
   return new Date(`${yyyyMmDd}T00:00:00.000Z`);
+}
+
+function safeTrim(s) {
+  const t = (s || "").toString().trim();
+  return t.length ? t : null;
 }
 
 async function getCurrentUser(req) {
@@ -75,11 +80,6 @@ function requireRole(user, roles) {
   }
 }
 
-function safeTrim(s) {
-  const t = (s || "").toString().trim();
-  return t.length ? t : null;
-}
-
 // nice JSON errors
 app.setErrorHandler((err, req, reply) => {
   const code = err.statusCode || 500;
@@ -88,6 +88,103 @@ app.setErrorHandler((err, req, reply) => {
 
 // ---------- health ----------
 app.get("/health", async () => ({ ok: true }));
+
+// ---------- start background automation (if you use it) ----------
+try {
+  startAutomation?.({ app, prisma });
+} catch (e) {
+  app.log.warn({ err: e }, "startAutomation failed (ignored)");
+}
+
+// ---------- AUTH (SINGLE COPY ONLY) ----------
+app.post("/seed/admin", async (req, reply) => {
+  const { email, password, name } = req.body || {};
+  if (!email || !password || !name) {
+    return reply.code(400).send({ error: "email, password, name required" });
+  }
+
+  const adminCount = await prisma.user.count({ where: { role: "ADMIN" } });
+  if (adminCount > 0) {
+    return reply.code(400).send({ error: "Admin already exists." });
+  }
+
+  const user = await prisma.user.create({
+    data: {
+      email: normalizeEmail(email),
+      name: name.trim(),
+      role: "ADMIN",
+      passwordHash: await bcrypt.hash(password, 10)
+    },
+    select: { id: true, email: true, name: true, role: true }
+  });
+
+  return { data: user };
+});
+
+app.post("/auth/register", async (req, reply) => {
+  const { name, email, password, role } = req.body || {};
+  if (!name || !email || !password || !role) {
+    return reply.code(400).send({ error: "name, email, password, role required" });
+  }
+
+  const allowed = ["ADMIN", "FACULTY", "STUDENT"];
+  if (!allowed.includes(role)) {
+    return reply.code(400).send({ error: "role must be ADMIN, FACULTY, or STUDENT" });
+  }
+
+  const normalizedEmail = normalizeEmail(email);
+  const exists = await prisma.user.findUnique({ where: { email: normalizedEmail } });
+  if (exists) return reply.code(400).send({ error: "Email already registered" });
+
+  const user = await prisma.user.create({
+    data: {
+      name: name.trim(),
+      email: normalizedEmail,
+      role,
+      passwordHash: await bcrypt.hash(password, 10)
+    },
+    select: { id: true, name: true, email: true, role: true }
+  });
+
+  return { data: user };
+});
+
+app.post("/auth/login", async (req, reply) => {
+  const { email, password } = req.body || {};
+  if (!email || !password) return reply.code(400).send({ error: "email and password required" });
+
+  const user = await prisma.user.findUnique({ where: { email: normalizeEmail(email) } });
+  if (!user) return reply.code(401).send({ error: "Invalid credentials" });
+
+  const ok = await bcrypt.compare(password, user.passwordHash);
+  if (!ok) return reply.code(401).send({ error: "Invalid credentials" });
+
+  const expiresAt = new Date(Date.now() + 1000 * 60 * 60 * 24 * 7);
+  const session = await prisma.session.create({ data: { userId: user.id, expiresAt } });
+
+  // CRITICAL for Vercel(frontend) -> Render(api) cookies:
+  reply.setCookie(SESSION_COOKIE, session.id, {
+    path: "/",
+    httpOnly: true,
+    secure: true,
+    sameSite: "none"
+  });
+
+  return { data: { id: user.id, name: user.name, role: user.role, email: user.email } };
+});
+
+app.get("/auth/me", async (req) => {
+  const user = await getCurrentUser(req);
+  if (!user) return { data: null };
+  return { data: { id: user.id, name: user.name, role: user.role, email: user.email } };
+});
+
+app.post("/auth/logout", async (req, reply) => {
+  const sid = req.cookies?.[SESSION_COOKIE];
+  if (sid) await prisma.session.delete({ where: { id: sid } }).catch(() => {});
+  reply.clearCookie(SESSION_COOKIE, { path: "/" });
+  return { ok: true };
+});
 
 // ---------- AI Assistant (Groq + tool calling) ----------
 const LLM_MODEL = process.env.GROQ_MODEL || "llama-3.3-70b-versatile";
@@ -140,7 +237,6 @@ async function runTool({ name, args, user }) {
   }
 
   switch (name) {
-    // ---------- CREATE ----------
     case "createBuilding": {
       const { buildingName, headName } = args || {};
       if (!buildingName) throw Object.assign(new Error("buildingName required"), { statusCode: 400 });
@@ -227,7 +323,6 @@ async function runTool({ name, args, user }) {
       return { ok: true, data };
     }
 
-    // ---------- LIST ----------
     case "listBuildings": {
       const data = await prisma.building.findMany({
         orderBy: { name: "asc" },
@@ -260,7 +355,6 @@ async function runTool({ name, args, user }) {
       return { ok: true, data };
     }
 
-    // ---------- READ/QUERY ----------
     case "myTimetableTomorrow": {
       const tomorrow = new Date();
       tomorrow.setDate(tomorrow.getDate() + 1);
@@ -386,8 +480,7 @@ const toolSpecs = [
     type: "function",
     function: {
       name: "createRoom",
-      description:
-        "Create a room inside a building; optionally assign it to a department (ADMIN only).",
+      description: "Create a room inside a building; optionally assign it to a department (ADMIN only).",
       parameters: {
         type: "object",
         properties: {
@@ -472,7 +565,6 @@ app.post("/ai/chat", async (req, reply) => {
 
   const { message, pendingAction } = req.body || {};
 
-  // Confirm -> execute tool
   if (pendingAction?.confirm === true) {
     const result = await runTool({
       name: pendingAction.name,
@@ -489,31 +581,17 @@ app.post("/ai/chat", async (req, reply) => {
 
   if (!message) return reply.code(400).send({ error: "message required" });
 
-  // ============================================================
-  // SMART DIRECT QUERY ROUTING
-  // Prevents hallucinations and wrong answers
-  // ============================================================
-
   const lower = message.toLowerCase().trim();
 
   // ---------- EVENTS ----------
-  if (
-    lower.includes("event") ||
-    lower.includes("events") ||
-    lower.includes("upcoming")
-  ) {
+  if (lower.includes("event") || lower.includes("events") || lower.includes("upcoming")) {
     const events = await prisma.event.findMany({
-      orderBy: {
-        startsAt: "asc"
-      },
+      orderBy: { startsAt: "asc" },
       take: 5
     });
 
     if (!events.length) {
-      return reply.send({
-        mode: "answered",
-        text: "No upcoming events found."
-      });
+      return reply.send({ mode: "answered", text: "No upcoming events found." });
     }
 
     return reply.send({
@@ -523,41 +601,25 @@ app.post("/ai/chat", async (req, reply) => {
         events
           .map(
             (e, i) =>
-              `${i + 1}. ${e.title}\n📍 ${e.location || "Campus"}\n📅 ${new Date(
-                e.startsAt
-              ).toLocaleString()}`
+              `${i + 1}. ${e.title}\n📍 ${e.location || "Campus"}\n📅 ${new Date(e.startsAt).toLocaleString()}`
           )
           .join("\n\n")
     });
   }
 
   // ---------- BUILDINGS ----------
-  if (
-    (
-      lower.includes("building") ||
-      lower.includes("buildings")
-    ) &&
+  if ((lower.includes("building") || lower.includes("buildings")) &&
+      !lower.startsWith("create building") &&
+      !lower.startsWith("create a building") &&
+      !lower.startsWith("add building")) {
 
-    !lower.startsWith("create building") &&
-    !lower.startsWith("create a building") &&
-    !lower.startsWith("add building")
-  ) {
-    const buildings =
-      await prisma.building.findMany({
-        include: {
-          departments: true,
-          rooms: true
-        },
-        orderBy: {
-          name: "asc"
-        }
-      });
+    const buildings = await prisma.building.findMany({
+      include: { departments: true, rooms: true },
+      orderBy: { name: "asc" }
+    });
 
     if (!buildings.length) {
-      return reply.send({
-        mode: "answered",
-        text: "No buildings found."
-      });
+      return reply.send({ mode: "answered", text: "No buildings found." });
     }
 
     return reply.send({
@@ -565,93 +627,46 @@ app.post("/ai/chat", async (req, reply) => {
       text:
         "Campus Buildings:\n\n" +
         buildings
-          .map(
-            (b, i) =>
-              `${i + 1}. ${b.name}\nDepartments: ${
-                b.departments.length
-              }\nRooms: ${b.rooms.length}`
-          )
+          .map((b, i) => `${i + 1}. ${b.name}\nDepartments: ${b.departments.length}\nRooms: ${b.rooms.length}`)
           .join("\n\n")
     });
   }
 
-  // =====================================
-  // CREATE DEPARTMENT
-  // =====================================
-
-  if (
-    lower.includes("create") &&
-    lower.includes("department")
-  ) {
-
-    // ADMIN CHECK
+  // ---------- CREATE DEPARTMENT ----------
+  if (lower.includes("create") && lower.includes("department")) {
     if (user.role !== "ADMIN") {
-      return reply.send({
-        mode: "answered",
-        text: "Only admin can create departments."
-      });
+      return reply.send({ mode: "answered", text: "Only admin can create departments." });
     }
 
-    // EXTRACT NAME
-    const match =
-      message.match(
-        /department\s+(.+)/i
-      );
-
-    const deptName =
-      match?.[1]?.trim();
+    const match = message.match(/department\s+(.+)/i);
+    const deptName = match?.[1]?.trim();
 
     if (!deptName) {
-      return reply.send({
-        mode: "answered",
-        text:
-          "Please provide department name."
-      });
+      return reply.send({ mode: "answered", text: "Please provide department name." });
     }
 
-    // ASK CONFIRMATION
     return reply.send({
       mode: "pending",
-      text:
-        `Do you want to create department "${deptName}"?`,
-      pendingAction: {
-        name: "createDepartment",
-        args: {
-          deptName
-        }
-      }
+      text: `Do you want to create department "${deptName}"?`,
+      pendingAction: { name: "createDepartment", args: { deptName } }
     });
   }
 
   // ---------- DEPARTMENTS ----------
-  if (
-    (
-      lower.includes("department") ||
-      lower.includes("departments")
-    ) &&
+  if ((lower.includes("department") || lower.includes("departments")) &&
+      !lower.startsWith("create department") &&
+      !lower.startsWith("create a department") &&
+      !lower.startsWith("create new department") &&
+      !lower.startsWith("add department") &&
+      !lower.startsWith("make department")) {
 
-    !lower.startsWith("create department") &&
-    !lower.startsWith("create a department") &&
-    !lower.startsWith("create new department") &&
-    !lower.startsWith("add department") &&
-    !lower.startsWith("make department")
-  ) {
-
-    const departments =
-      await prisma.department.findMany({
-        include: {
-          building: true
-        },
-        orderBy: {
-          name: "asc"
-        }
-      });
+    const departments = await prisma.department.findMany({
+      include: { building: true },
+      orderBy: { name: "asc" }
+    });
 
     if (!departments.length) {
-      return reply.send({
-        mode: "answered",
-        text: "No departments found."
-      });
+      return reply.send({ mode: "answered", text: "No departments found." });
     }
 
     return reply.send({
@@ -659,42 +674,24 @@ app.post("/ai/chat", async (req, reply) => {
       text:
         "Departments:\n\n" +
         departments
-          .map(
-            (d, i) =>
-              `${i + 1}. ${d.name}\n🏢 ${d.building?.name || "Unknown Building"}`
-          )
+          .map((d, i) => `${i + 1}. ${d.name}\n🏢 ${d.building?.name || "Unknown Building"}`)
           .join("\n\n")
     });
   }
 
   // ---------- ROOMS ----------
-  if (
-    (
-      lower.includes("room") ||
-      lower.includes("lab") ||
-      lower.includes("classroom")
-    ) &&
+  if ((lower.includes("room") || lower.includes("lab") || lower.includes("classroom")) &&
+      !lower.startsWith("create room") &&
+      !lower.startsWith("add room")) {
 
-    !lower.startsWith("create room") &&
-    !lower.startsWith("add room")
-  ) {
-    const rooms =
-      await prisma.room.findMany({
-        include: {
-          building: true,
-          department: true
-        },
-        orderBy: {
-          name: "asc"
-        },
-        take: 20
-      });
+    const rooms = await prisma.room.findMany({
+      include: { building: true, department: true },
+      orderBy: { name: "asc" },
+      take: 20
+    });
 
     if (!rooms.length) {
-      return reply.send({
-        mode: "answered",
-        text: "No rooms found."
-      });
+      return reply.send({ mode: "answered", text: "No rooms found." });
     }
 
     return reply.send({
@@ -702,50 +699,21 @@ app.post("/ai/chat", async (req, reply) => {
       text:
         "Campus Rooms:\n\n" +
         rooms
-          .map(
-            (r, i) =>
-              `${i + 1}. ${r.name}\n🏢 ${r.building?.name || ""}\n📘 ${
-                r.department?.name || "General"
-              }`
-          )
+          .map((r, i) => `${i + 1}. ${r.name}\n🏢 ${r.building?.name || ""}\n📘 ${r.department?.name || "General"}`)
           .join("\n\n")
     });
   }
 
   // ---------- FACULTY TIMETABLE ----------
-  if (
-    user.role === "FACULTY" &&
-    (
-      lower.includes("timetable") ||
-      lower.includes("lecture") ||
-      lower.includes("class")
-    )
-  ) {
-    const data =
-      await prisma.timetableEntry.findMany({
-        where: {
-          facultyId: user.id
-        },
-        include: {
-          subject: true,
-          section: true,
-          room: true
-        },
-        orderBy: [
-          {
-            dayOfWeek: "asc"
-          },
-          {
-            startTime: "asc"
-          }
-        ]
-      });
+  if (user.role === "FACULTY" && (lower.includes("timetable") || lower.includes("lecture") || lower.includes("class"))) {
+    const data = await prisma.timetableEntry.findMany({
+      where: { facultyId: user.id },
+      include: { subject: true, section: true, room: true },
+      orderBy: [{ dayOfWeek: "asc" }, { startTime: "asc" }]
+    });
 
     if (!data.length) {
-      return reply.send({
-        mode: "answered",
-        text: "No timetable assigned yet."
-      });
+      return reply.send({ mode: "answered", text: "No timetable assigned yet." });
     }
 
     return reply.send({
@@ -753,62 +721,27 @@ app.post("/ai/chat", async (req, reply) => {
       text:
         "Your Timetable:\n\n" +
         data
-          .map(
-            (t) =>
-              `📘 ${t.subject?.name}\n👨‍🎓 Section: ${t.section?.name}\n🏢 Room: ${t.room?.name}\n⏰ ${t.startTime} - ${t.endTime}`
-          )
+          .map((t) => `📘 ${t.subject?.name}\n👨‍🎓 Section: ${t.section?.name}\n🏢 Room: ${t.room?.name}\n⏰ ${t.startTime} - ${t.endTime}`)
           .join("\n\n")
     });
   }
 
   // ---------- STUDENT TIMETABLE ----------
-  if (
-    user.role === "STUDENT" &&
-    (
-      lower.includes("timetable") ||
-      lower.includes("lecture") ||
-      lower.includes("class")
-    )
-  ) {
-    const enrollment =
-      await prisma.enrollment.findFirst({
-        where: {
-          studentId: user.id
-        }
-      });
+  if (user.role === "STUDENT" && (lower.includes("timetable") || lower.includes("lecture") || lower.includes("class"))) {
+    const enrollment = await prisma.enrollment.findFirst({ where: { studentId: user.id } });
 
     if (!enrollment) {
-      return reply.send({
-        mode: "answered",
-        text: "You are not enrolled in any section."
-      });
+      return reply.send({ mode: "answered", text: "You are not enrolled in any section." });
     }
 
-    const data =
-      await prisma.timetableEntry.findMany({
-        where: {
-          sectionId: enrollment.sectionId
-        },
-        include: {
-          subject: true,
-          faculty: true,
-          room: true
-        },
-        orderBy: [
-          {
-            dayOfWeek: "asc"
-          },
-          {
-            startTime: "asc"
-          }
-        ]
-      });
+    const data = await prisma.timetableEntry.findMany({
+      where: { sectionId: enrollment.sectionId },
+      include: { subject: true, faculty: true, room: true },
+      orderBy: [{ dayOfWeek: "asc" }, { startTime: "asc" }]
+    });
 
     if (!data.length) {
-      return reply.send({
-        mode: "answered",
-        text: "No timetable found."
-      });
+      return reply.send({ mode: "answered", text: "No timetable found." });
     }
 
     return reply.send({
@@ -816,59 +749,36 @@ app.post("/ai/chat", async (req, reply) => {
       text:
         "Your Timetable:\n\n" +
         data
-          .map(
-            (t) =>
-              `📘 ${t.subject?.name}\n👨‍🏫 ${t.faculty?.name}\n🏢 ${t.room?.name}\n⏰ ${t.startTime} - ${t.endTime}`
-          )
+          .map((t) => `📘 ${t.subject?.name}\n👨‍🏫 ${t.faculty?.name}\n🏢 ${t.room?.name}\n⏰ ${t.startTime} - ${t.endTime}`)
           .join("\n\n")
     });
   }
 
-  // ---------- ATTENDANCE ----------
-  if (
-    lower.includes("attendance")
-  ) {
-
+  // ---------- ATTENDANCE (your existing Attendance model) ----------
+  if (lower.includes("attendance")) {
     if (user.role !== "STUDENT") {
-      return reply.send({
-        mode: "answered",
-        text: "Attendance summary is available only for students."
-      });
+      return reply.send({ mode: "answered", text: "Attendance summary is available only for students." });
     }
 
-    const records =
-      await prisma.attendance.findMany({
-        where: {
-          studentId: user.id
-        }
-      });
+    const records = await prisma.attendance.findMany({
+      where: { studentId: user.id }
+    });
 
     if (!records.length) {
-      return reply.send({
-        mode: "answered",
-        text: "No attendance records found."
-      });
+      return reply.send({ mode: "answered", text: "No attendance records found." });
     }
 
-    const present =
-      records.filter(
-        (r) => r.status === "PRESENT"
-      ).length;
-
+    const present = records.filter((r) => r.status === "PRESENT").length;
     const total = records.length;
-
-    const percentage =
-      Math.round(
-        (present / total) * 100
-      );
+    const percentage = Math.round((present / total) * 100);
 
     return reply.send({
       mode: "answered",
-      text:
-        `Your attendance is ${percentage}%.\n\nPresent: ${present}\nTotal Classes: ${total}`
+      text: `Your attendance is ${percentage}%.\n\nPresent: ${present}\nTotal Classes: ${total}`
     });
   }
 
+  // ---------- LLM fallback (tool calling) ----------
   const system = `
 You are Pixelin Assistant.
 
@@ -903,9 +813,7 @@ When you call a tool, do NOT repeat the tool call again after receiving tool res
       const name = first.function?.name;
       const args = safeJsonParse(first.function?.arguments || "{}");
 
-      const mutating = ["createBuilding", "createDepartment", "createSection", "createSubject", "createRoom"].includes(
-        name
-      );
+      const mutating = ["createBuilding", "createDepartment", "createSection", "createSubject", "createRoom"].includes(name);
 
       if (mutating && user.role !== "ADMIN") {
         return reply.send({ mode: "answered", text: "Only ADMIN can create or edit data." });
@@ -921,18 +829,8 @@ When you call a tool, do NOT repeat the tool call again after receiving tool res
 
       const toolResult = await runTool({ name, args, user });
 
-      messages.push({
-        role: "assistant",
-        content: "",
-        tool_calls: toolCalls
-      });
-
-      messages.push({
-        role: "tool",
-        tool_call_id: first.id,
-        name,
-        content: JSON.stringify(toolResult)
-      });
+      messages.push({ role: "assistant", content: "", tool_calls: toolCalls });
+      messages.push({ role: "tool", tool_call_id: first.id, name, content: JSON.stringify(toolResult) });
 
       continue;
     }
@@ -945,301 +843,6 @@ When you call a tool, do NOT repeat the tool call again after receiving tool res
     mode: "answered",
     text: "I tried to fetch that, but the assistant got stuck. Please try again or rephrase."
   });
-});
-
-// ---------- DEV seed: first admin (optional) ----------
-app.post("/seed/admin", async (req, reply) => {
-  const { email, password, name } = req.body || {};
-  if (!email || !password || !name) {
-    return reply.code(400).send({ error: "email, password, name required" });
-  }
-
-  const adminCount = await prisma.user.count({ where: { role: "ADMIN" } });
-  if (adminCount > 0) {
-    return reply.code(400).send({ error: "Admin already exists." });
-  }
-
-  const user = await prisma.user.create({
-    data: {
-      email: normalizeEmail(email),
-      name: name.trim(),
-      role: "ADMIN",
-      passwordHash: await bcrypt.hash(password, 10)
-    },
-    select: { id: true, email: true, name: true, role: true }
-  });
-
-  return { data: user };
-});
-
-// ---------- AUTH ----------
-app.post("/auth/register", async (req, reply) => {
-  const { name, email, password, role } = req.body || {};
-  if (!name || !email || !password || !role) {
-    return reply.code(400).send({ error: "name, email, password, role required" });
-  }
-
-  const allowed = ["ADMIN", "FACULTY", "STUDENT"];
-  if (!allowed.includes(role)) {
-    return reply.code(400).send({ error: "role must be ADMIN, FACULTY, or STUDENT" });
-  }
-
-  const normalizedEmail = normalizeEmail(email);
-  const exists = await prisma.user.findUnique({ where: { email: normalizedEmail } });
-  if (exists) return reply.code(400).send({ error: "Email already registered" });
-
-  const user = await prisma.user.create({
-    data: {
-      name: name.trim(),
-      email: normalizedEmail,
-      role,
-      passwordHash: await bcrypt.hash(password, 10)
-    },
-    select: { id: true, name: true, email: true, role: true }
-  });
-
-  return { data: user };
-});
-
-app.post("/auth/login", async (req, reply) => {
-  const { email, password } = req.body || {};
-  if (!email || !password) return reply.code(400).send({ error: "email and password required" });
-
-  const user = await prisma.user.findUnique({ where: { email: normalizeEmail(email) } });
-  if (!user) return reply.code(401).send({ error: "Invalid credentials" });
-
-  const ok = await bcrypt.compare(password, user.passwordHash);
-  if (!ok) return reply.code(401).send({ error: "Invalid credentials" });
-
-  const expiresAt = new Date(Date.now() + 1000 * 60 * 60 * 24 * 7);
-  const session = await prisma.session.create({ data: { userId: user.id, expiresAt } });
-
-  reply.setCookie(SESSION_COOKIE, session.id, {
-  path: "/",
-  httpOnly: true,
-  secure: true,
-  sameSite: "none"
-});
-
-  return { data: { id: user.id, name: user.name, role: user.role, email: user.email } };
-});
-
-app.get("/auth/me", async (req) => {
-  const user = await getCurrentUser(req);
-  if (!user) return { data: null };
-  return { data: { id: user.id, name: user.name, role: user.role, email: user.email } };
-});
-
-app.post("/auth/logout", async (req, reply) => {
-  const sid = req.cookies?.[SESSION_COOKIE];
-  if (sid) await prisma.session.delete({ where: { id: sid } }).catch(() => {});
-  reply.clearCookie(SESSION_COOKIE, { path: "/" });
-  return { ok: true };
-});
-
-// ---------- Admin CRUD (Infrastructure) ----------
-app.get("/admin/buildings", async (req) => {
-  const user = await getCurrentUser(req);
-  requireRole(user, ["ADMIN"]);
-
-  const data = await prisma.building.findMany({
-    orderBy: { name: "asc" },
-    include: {
-      departments: { orderBy: { name: "asc" } },
-      rooms: { orderBy: { name: "asc" } }
-    }
-  });
-
-  return { data };
-});
-
-app.post("/admin/buildings", async (req) => {
-  const user = await getCurrentUser(req);
-  requireRole(user, ["ADMIN"]);
-
-  const { name, headName, code } = req.body || {};
-
-  if (!name) {
-    throw Object.assign(
-      new Error("name required"),
-      { statusCode: 400 }
-    );
-  }
-
-  const data = await prisma.building.create({
-    data: {
-      name: name.trim()
-    }
-  });
-
-  return { data };
-});
-
-app.put("/admin/buildings/:id", async (req) => {
-  const user = await getCurrentUser(req);
-  requireRole(user, ["ADMIN"]);
-
-  const { id } = req.params;
-  const { name, headName, code } = req.body || {};
-
-  if (!name) throw Object.assign(new Error("name required"), { statusCode: 400 });
-
-  const data = await prisma.building.update({
-    where: { id: parseInt(id) },
-    data: {
-      name: name.trim()
-    }
-  });
-
-  return { data };
-});
-
-app.delete("/admin/buildings/:id", async (req) => {
-  const user = await getCurrentUser(req);
-  requireRole(user, ["ADMIN"]);
-
-  const { id } = req.params;
-
-  await prisma.building.delete({
-    where: { id: parseInt(id) }
-  });
-
-  return { data: { success: true } };
-});
-
-
-
-app.post("/admin/departments", async (req) => {
-  const user = await getCurrentUser(req);
-  requireRole(user, ["ADMIN"]);
-
-  const { buildingId, name, hodName } = req.body || {};
-  if (!buildingId || !name) {
-    throw Object.assign(new Error("buildingId and name required"), { statusCode: 400 });
-  }
-
-  const data = await prisma.department.create({
-    data: {
-      buildingId,
-      name: name.trim(),
-      hodName: safeTrim(hodName)
-    }
-  });
-
-  return { data };
-});
-
-
-
-app.get("/admin/departments", async (req) => {
-  const user = await getCurrentUser(req);
-  requireRole(user, ["ADMIN"]);
-
-  const buildingId = req.query?.buildingId;
-
-  const data = await prisma.department.findMany({
-    where: buildingId
-      ? { buildingId: parseInt(buildingId) }
-      : undefined,
-
-    include: { building: true },
-
-    orderBy: [
-      { building: { name: "asc" } },
-      { name: "asc" }
-    ]
-  });
-
-  return { data };
-});
-
-app.get("/admin/rooms", async (req) => {
-  const user = await getCurrentUser(req);
-  requireRole(user, ["ADMIN"]);
-
-  const buildingId = req.query?.buildingId?.toString();
-
-  const data = await prisma.room.findMany({
-    where: buildingId
-      ? { buildingId: parseInt(buildingId) }
-      : undefined,
-    include: { building: true, department: true },
-    orderBy: [{ building: { name: "asc" } }, { name: "asc" }]
-  });
-
-  return { data };
-});
-
-app.post("/admin/rooms", async (req) => {
-  const user = await getCurrentUser(req);
-  requireRole(user, ["ADMIN"]);
-
-  const {
-    buildingId,
-    name,
-    departmentId
-  } = req.body || {};
-
-  if (!buildingId || !name) {
-    throw Object.assign(
-      new Error("buildingId and name required"),
-      { statusCode: 400 }
-    );
-  }
-
-  const data = await prisma.room.create({
-    data: {
-      buildingId,
-      name: name.trim(),
-      departmentId: departmentId || null
-    }
-  });
-
-  return { data };
-});
-
-
-app.put("/admin/rooms/:id", async (req) => {
-  const user = await getCurrentUser(req);
-  requireRole(user, ["ADMIN"]);
-
-  const { id } = req.params;
-
-  const {
-    buildingId,
-    name,
-    departmentId
-  } = req.body || {};
-
-  const data = await prisma.room.update({
-    where: { id },
-
-    data: {
-      buildingId,
-      name: name.trim(),
-      departmentId: departmentId || null
-    },
-
-    include: {
-      building: true,
-      department: true
-    }
-  });
-
-  return { data };
-});
-
-app.delete("/admin/rooms/:id", async (req) => {
-  const user = await getCurrentUser(req);
-  requireRole(user, ["ADMIN"]);
-
-  const { id } = req.params;
-
-  await prisma.room.delete({
-    where: { id: parseInt(id) }
-  });
-
-  return { data: { success: true } };
 });
 
 // ---------- Infrastructure (read-only for any logged-in user) ----------
@@ -1282,13 +885,177 @@ app.get("/infra/rooms", async (req) => {
   return { data };
 });
 
-// ---------- EVENTS ----------
+// ---------- Admin CRUD (Infrastructure) ----------
+app.get("/admin/buildings", async (req) => {
+  const user = await getCurrentUser(req);
+  requireRole(user, ["ADMIN"]);
 
+  const data = await prisma.building.findMany({
+    orderBy: { name: "asc" },
+    include: {
+      departments: { orderBy: { name: "asc" } },
+      rooms: { orderBy: { name: "asc" } }
+    }
+  });
+
+  return { data };
+});
+
+app.post("/admin/buildings", async (req) => {
+  const user = await getCurrentUser(req);
+  requireRole(user, ["ADMIN"]);
+
+  const { name, headName } = req.body || {};
+  if (!name) throw Object.assign(new Error("name required"), { statusCode: 400 });
+
+  const data = await prisma.building.create({
+    data: {
+      name: name.trim(),
+      headName: safeTrim(headName)
+    }
+  });
+
+  return { data };
+});
+
+app.put("/admin/buildings/:id", async (req) => {
+  const user = await getCurrentUser(req);
+  requireRole(user, ["ADMIN"]);
+
+  const { id } = req.params;
+  const { name, headName } = req.body || {};
+  if (!name) throw Object.assign(new Error("name required"), { statusCode: 400 });
+
+  // FIX: do NOT parseInt (id is cuid string)
+  const data = await prisma.building.update({
+    where: { id },
+    data: { name: name.trim(), headName: safeTrim(headName) }
+  });
+
+  return { data };
+});
+
+app.delete("/admin/buildings/:id", async (req) => {
+  const user = await getCurrentUser(req);
+  requireRole(user, ["ADMIN"]);
+
+  const { id } = req.params;
+
+  // FIX: do NOT parseInt
+  await prisma.building.delete({ where: { id } });
+
+  return { data: { success: true } };
+});
+
+app.post("/admin/departments", async (req) => {
+  const user = await getCurrentUser(req);
+  requireRole(user, ["ADMIN"]);
+
+  const { buildingId, name, hodName } = req.body || {};
+  if (!buildingId || !name) {
+    throw Object.assign(new Error("buildingId and name required"), { statusCode: 400 });
+  }
+
+  const data = await prisma.department.create({
+    data: {
+      buildingId,
+      name: name.trim(),
+      hodName: safeTrim(hodName)
+    }
+  });
+
+  return { data };
+});
+
+app.get("/admin/departments", async (req) => {
+  const user = await getCurrentUser(req);
+  requireRole(user, ["ADMIN"]);
+
+  const buildingId = req.query?.buildingId?.toString();
+
+  const data = await prisma.department.findMany({
+    where: buildingId ? { buildingId } : undefined,
+    include: { building: true },
+    orderBy: [{ building: { name: "asc" } }, { name: "asc" }]
+  });
+
+  return { data };
+});
+
+app.get("/admin/rooms", async (req) => {
+  const user = await getCurrentUser(req);
+  requireRole(user, ["ADMIN"]);
+
+  const buildingId = req.query?.buildingId?.toString();
+
+  const data = await prisma.room.findMany({
+    where: buildingId ? { buildingId } : undefined,
+    include: { building: true, department: true },
+    orderBy: [{ building: { name: "asc" } }, { name: "asc" }]
+  });
+
+  return { data };
+});
+
+app.post("/admin/rooms", async (req) => {
+  const user = await getCurrentUser(req);
+  requireRole(user, ["ADMIN"]);
+
+  const { buildingId, name, departmentId, label } = req.body || {};
+
+  if (!buildingId || !name) {
+    throw Object.assign(new Error("buildingId and name required"), { statusCode: 400 });
+  }
+
+  const data = await prisma.room.create({
+    data: {
+      buildingId,
+      name: name.trim(),
+      label: safeTrim(label),
+      departmentId: departmentId || null
+    }
+  });
+
+  return { data };
+});
+
+app.put("/admin/rooms/:id", async (req) => {
+  const user = await getCurrentUser(req);
+  requireRole(user, ["ADMIN"]);
+
+  const { id } = req.params;
+  const { buildingId, name, departmentId, label } = req.body || {};
+
+  const data = await prisma.room.update({
+    where: { id },
+    data: {
+      buildingId,
+      name: name.trim(),
+      label: safeTrim(label),
+      departmentId: departmentId || null
+    },
+    include: { building: true, department: true }
+  });
+
+  return { data };
+});
+
+app.delete("/admin/rooms/:id", async (req) => {
+  const user = await getCurrentUser(req);
+  requireRole(user, ["ADMIN"]);
+
+  const { id } = req.params;
+
+  // FIX: do NOT parseInt
+  await prisma.room.delete({ where: { id } });
+
+  return { data: { success: true } };
+});
+
+// ---------- EVENTS ----------
 app.get("/events", async () => {
   const data = await prisma.event.findMany({
-    orderBy: {
-      startsAt: "asc"
-    }
+    orderBy: { startsAt: "asc" }
   });
 
   return { data };
@@ -1310,15 +1077,12 @@ app.post("/admin/events", async (req) => {
   for await (const part of parts) {
     if (part.type === "file") {
       const ext = path.extname(part.filename || "");
-
       const fileName = `${Date.now()}${ext}`;
 
-      const savePath = path.join(
-        process.cwd(),
-        "uploads/events",
-        fileName
-      );
+      const dir = path.join(process.cwd(), "uploads/events");
+      fs.mkdirSync(dir, { recursive: true });
 
+      const savePath = path.join(dir, fileName);
       await pipeline(part.file, fs.createWriteStream(savePath));
 
       poster = `/uploads/events/${fileName}`;
@@ -1332,18 +1096,15 @@ app.post("/admin/events", async (req) => {
   }
 
   if (!title || !startsAt) {
-    throw Object.assign(
-      new Error("title and startsAt required"),
-      { statusCode: 400 }
-    );
+    throw Object.assign(new Error("title and startsAt required"), { statusCode: 400 });
   }
 
   const data = await prisma.event.create({
     data: {
       title: title.trim(),
-      details: details?.trim() || null,
-      description: description?.trim() || null,
-      location: location?.trim() || null,
+      details: safeTrim(details),
+      description: safeTrim(description),
+      location: safeTrim(location),
       startsAt: new Date(startsAt),
       poster
     }
@@ -1357,19 +1118,12 @@ app.delete("/admin/events/:id", async (req) => {
   requireRole(user, ["ADMIN"]);
 
   const { id } = req.params;
+  await prisma.event.delete({ where: { id } });
 
-  await prisma.event.delete({
-    where: { id }
-  });
-
-  return {
-    data: {
-      success: true
-    }
-  };
+  return { data: { success: true } };
 });
 
-// ---------- Admin CRUD (existing: sections/subjects/users/enrollments/assignments/timetable) ----------
+// ---------- Admin CRUD (sections/subjects/users/enrollments/assignments/timetable) ----------
 app.get("/admin/sections", async (req) => {
   const user = await getCurrentUser(req);
   requireRole(user, ["ADMIN"]);
@@ -1506,9 +1260,9 @@ app.post("/admin/assignments", async (req) => {
   return { data };
 });
 
+// ---------- Leave ----------
 app.post("/student/leave", async (req) => {
   const user = await getCurrentUser(req);
-
   requireRole(user, ["STUDENT"]);
 
   const parts = req.parts();
@@ -1525,15 +1279,12 @@ app.post("/student/leave", async (req) => {
   for await (const part of parts) {
     if (part.type === "file") {
       const ext = path.extname(part.filename || "");
-
       const fileName = `${Date.now()}${ext}`;
 
-      const savePath = path.join(
-        process.cwd(),
-        "uploads/leave-certificates",
-        fileName
-      );
+      const dir = path.join(process.cwd(), "uploads/leave-certificates");
+      fs.mkdirSync(dir, { recursive: true });
 
+      const savePath = path.join(dir, fileName);
       await pipeline(part.file, fs.createWriteStream(savePath));
 
       medicalFile = `/uploads/leave-certificates/${fileName}`;
@@ -1567,16 +1318,11 @@ app.post("/student/leave", async (req) => {
 
 app.get("/student/leave", async (req) => {
   const user = await getCurrentUser(req);
-
   requireRole(user, ["STUDENT"]);
 
   const data = await prisma.leaveApplication.findMany({
-    where: {
-      studentId: user.id
-    },
-    orderBy: {
-      createdAt: "desc"
-    }
+    where: { studentId: user.id },
+    orderBy: { createdAt: "desc" }
   });
 
   return { data };
@@ -1584,13 +1330,10 @@ app.get("/student/leave", async (req) => {
 
 app.get("/admin/leaves", async (req) => {
   const user = await getCurrentUser(req);
-
   requireRole(user, ["ADMIN"]);
 
   const data = await prisma.leaveApplication.findMany({
-    orderBy: {
-      createdAt: "desc"
-    }
+    orderBy: { createdAt: "desc" }
   });
 
   return { data };
@@ -1598,20 +1341,13 @@ app.get("/admin/leaves", async (req) => {
 
 app.put("/admin/leaves/:id/approve", async (req) => {
   const user = await getCurrentUser(req);
-
   requireRole(user, ["ADMIN"]);
 
   const { id } = req.params;
-
   const { approvedDays } = req.body || {};
 
-  const leave = await prisma.leaveApplication.findUnique({
-    where: { id }
-  });
-
-  if (!leave) {
-    throw new Error("Leave not found");
-  }
+  const leave = await prisma.leaveApplication.findUnique({ where: { id } });
+  if (!leave) throw new Error("Leave not found");
 
   const updated = await prisma.leaveApplication.update({
     where: { id },
@@ -1623,25 +1359,12 @@ app.put("/admin/leaves/:id/approve", async (req) => {
 
   for (let i = 0; i < parseInt(approvedDays); i++) {
     const d = new Date(leave.startDate);
-
     d.setDate(d.getDate() + i);
 
     await prisma.attendance.upsert({
-      where: {
-        studentId_date: {
-          studentId: leave.studentId,
-          date: d
-        }
-      },
-
-      update: {
-        status: "PRESENT"
-      },
-      create: {
-        studentId: leave.studentId,
-        date: d,
-        status: "PRESENT"
-      }
+      where: { studentId_date: { studentId: leave.studentId, date: d } },
+      update: { status: "PRESENT" },
+      create: { studentId: leave.studentId, date: d, status: "PRESENT" }
     });
   }
 
@@ -1650,55 +1373,29 @@ app.put("/admin/leaves/:id/approve", async (req) => {
 
 app.put("/admin/leaves/:id/reject", async (req) => {
   const user = await getCurrentUser(req);
-
   requireRole(user, ["ADMIN"]);
 
   const { id } = req.params;
 
   const data = await prisma.leaveApplication.update({
     where: { id },
-    data: {
-      status: "REJECTED",
-      approvedDays: 0
-    }
+    data: { status: "REJECTED", approvedDays: 0 }
   });
 
   return { data };
 });
 
+// ---------- Attendance (your existing Attendance model) ----------
 app.post("/faculty/attendance", async (req) => {
   const user = await getCurrentUser(req);
-
   requireRole(user, ["FACULTY"]);
 
-  const {
-    studentId,
-    status,
-    subject,
-    date
-  } = req.body || {};
+  const { studentId, status, subject, date } = req.body || {};
 
   const data = await prisma.attendance.upsert({
-    where: {
-      studentId_date: {
-        studentId,
-        date: new Date(date)
-      }
-    },
-
-    update: {
-      status,
-      facultyId: user.id,
-      subject
-    },
-
-    create: {
-      studentId,
-      facultyId: user.id,
-      status,
-      subject,
-      date: new Date(date)
-    }
+    where: { studentId_date: { studentId, date: new Date(date) } },
+    update: { status, facultyId: user.id, subject },
+    create: { studentId, facultyId: user.id, status, subject, date: new Date(date) }
   });
 
   return { data };
@@ -1706,16 +1403,11 @@ app.post("/faculty/attendance", async (req) => {
 
 app.get("/student/attendance", async (req) => {
   const user = await getCurrentUser(req);
-
   requireRole(user, ["STUDENT"]);
 
   const data = await prisma.attendance.findMany({
-    where: {
-      studentId: user.id
-    },
-    orderBy: {
-      date: "desc"
-    }
+    where: { studentId: user.id },
+    orderBy: { date: "desc" }
   });
 
   return { data };
@@ -1758,12 +1450,7 @@ app.post("/admin/timetable", async (req) => {
   return { data };
 });
 
-// ============================================================
-// ADD THIS to services/api/src/index.js
-// Place it RIGHT AFTER your existing app.post("/admin/timetable", ...) route
-// ============================================================
-
-app.delete("/admin/timetable/:id", async (req, reply) => {
+app.delete("/admin/timetable/:id", async (req) => {
   const user = await getCurrentUser(req);
   requireRole(user, ["ADMIN"]);
 
@@ -1803,7 +1490,7 @@ app.get("/faculty/timetable", async (req) => {
   return { data };
 });
 
-// ---------- Attendance ----------
+// ---------- AttendanceSession / AttendanceRecord ----------
 app.post("/attendance/session", async (req, reply) => {
   const user = await getCurrentUser(req);
   requireRole(user, ["FACULTY"]);
@@ -1920,4 +1607,4 @@ app.get("/student/attendance/summary", async (req) => {
 });
 
 // ---------- start ----------
-app.listen({ port: 4000, host: "0.0.0.0" });
+await app.listen({ port: Number(process.env.PORT || 4000), host: "0.0.0.0" });

@@ -17,8 +17,8 @@ export default function FacultyHome() {
     async function loadCampus() {
       try {
         const [b, d] = await Promise.all([
-          apiGet("/admin/buildings"),
-          apiGet("/admin/departments"),
+          apiGet("/infra/buildings"),
+apiGet("/infra/departments"),
         ]);
         setBuildings(b   || []);
         setDepartments(d || []);

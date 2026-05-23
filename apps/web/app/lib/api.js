@@ -1,77 +1,62 @@
-const BASE =
-  process.env.NEXT_PUBLIC_API_URL ||
-  "https://pixelin-campus.onrender.com";
+// lib/api.js
 
-async function request(method, path, body) {
+const BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:4000";
+
+/**
+ * Core fetch wrapper.
+ * - Always sends cookies (credentials: "include") — required for cross-origin sessions
+ *   between Vercel (frontend) and Render (backend).
+ * - Throws an Error with .message set to the server's { error } string so
+ *   catch blocks in pages can display it directly.
+ */
+async function apiFetch(path, options = {}) {
+  const res = await fetch(`${BASE_URL}${path}`, {
+    ...options,
+    // ✅ FIX: Must include credentials for cross-origin cookie sessions
+    credentials: "include",
+    headers: {
+      "Content-Type": "application/json",
+      ...(options.headers || {}),
+    },
+  });
+
+  // Try to parse JSON regardless of status code
+  let json;
   try {
-    const res = await fetch(`${BASE}${path}`, {
-      method,
-      credentials: "include",
-
-      headers:
-        body !== undefined
-          ? {
-              "Content-Type": "application/json"
-            }
-          : {},
-
-      body:
-        body !== undefined
-          ? JSON.stringify(body)
-          : undefined
-    });
-
-    // HANDLE NON-JSON RESPONSES
-    const contentType =
-      res.headers.get("content-type") || "";
-
-    let json = null;
-
-    if (contentType.includes("application/json")) {
-      json = await res.json();
-    }
-
-    // HANDLE ERRORS
-    if (!res.ok) {
-      throw new Error(
-        json?.error ||
-          `${method} ${path} failed (${res.status})`
-      );
-    }
-
-    // HANDLE EMPTY RESPONSES
-    if (res.status === 204) {
-      return null;
-    }
-
-    // UNWRAP { data: ... }
-    return json &&
-      typeof json === "object" &&
-      "data" in json
-      ? json.data
-      : json;
-
-  } catch (err) {
-    console.error("API ERROR:", err);
-
-    throw new Error(
-      err.message ||
-      "Failed to connect to server"
-    );
+    json = await res.json();
+  } catch {
+    // Non-JSON response (e.g. 502/504 from proxy)
+    throw new Error(`Server error (${res.status})`);
   }
+
+  if (!res.ok) {
+    // ✅ FIX: Backend sends { error: "..." } — surface that message
+    throw new Error(json?.error || `Request failed (${res.status})`);
+  }
+
+  return json;
 }
 
-export const apiGet = (path) =>
-  request("GET", path);
+export function apiGet(path, options = {}) {
+  return apiFetch(path, { method: "GET", ...options });
+}
 
-export const apiPost = (path, body) =>
-  request("POST", path, body);
+export function apiPost(path, body, options = {}) {
+  return apiFetch(path, {
+    method: "POST",
+    body: JSON.stringify(body),
+    ...options,
+  });
+}
 
-export const apiPut = (path, body) =>
-  request("PUT", path, body);
+export function apiPut(path, body, options = {}) {
+  return apiFetch(path, {
+    method: "PUT",
+    body: JSON.stringify(body),
+    ...options,
+  });
+}
 
-export const apiPatch = (path, body) =>
-  request("PATCH", path, body);
-
-export const apiDel = (path) =>
-  request("DELETE", path);
+export function apiDelete(path, options = {}) {
+  return apiFetch(path, { method: "DELETE", ...options });
+}

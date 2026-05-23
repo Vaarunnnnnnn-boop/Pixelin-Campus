@@ -18,10 +18,13 @@ export default function FacultyHome() {
       try {
         const [b, d] = await Promise.all([
           apiGet("/infra/buildings"),
-apiGet("/infra/departments"),
+          apiGet("/infra/departments"),
         ]);
-        setBuildings(b   || []);
-        setDepartments(d || []);
+        // ✅ FIX: Backend returns { data: [...] } — unwrap .data
+        // Old code did setBuildings(b) which set buildings = { data: [...] }
+        // so buildings.length was undefined and .map() crashed
+        setBuildings(b?.data || []);
+        setDepartments(d?.data || []);
       } catch (err) {
         console.error("Failed to load campus info:", err);
       } finally {
@@ -31,13 +34,22 @@ apiGet("/infra/departments"),
     if (me?.role === "FACULTY") loadCampus();
   }, [me]);
 
+  // undefined = still loading useMe
   if (me === undefined) return <div className="p-8">Loading…</div>;
-  if (!me) { if (typeof window !== "undefined") window.location.href = "/login"; return null; }
+
+  // null = not logged in → redirect
+  if (!me) {
+    if (typeof window !== "undefined") window.location.href = "/login";
+    return null;
+  }
+
+  // wrong role
   if (me.role !== "FACULTY") return <div className="p-8">Forbidden</div>;
 
   return (
     <AppShell title="Faculty Dashboard">
       <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="space-y-8">
+
         <motion.div initial={{ opacity: 0, y: -10 }} animate={{ opacity: 1, y: 0 }}>
           <h1 className="text-3xl font-bold text-slate-900">Welcome, Prof. {me.name}!</h1>
           <p className="text-slate-600 mt-2">Manage your classes and campus resources</p>
@@ -117,6 +129,7 @@ apiGet("/infra/departments"),
             </Card>
           </a>
         </motion.div>
+
       </motion.div>
     </AppShell>
   );

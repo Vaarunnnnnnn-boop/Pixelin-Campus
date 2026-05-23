@@ -26,7 +26,6 @@ export default function LoginPage() {
       const res = await apiPost("/auth/login", form);
 
       // ✅ FIX: Backend returns { data: { id, name, role, email } }
-      // Previously the code read res?.user?.role || res?.role — both wrong.
       const role = res?.data?.role;
 
       if (role === "ADMIN")        router.push("/admin");
@@ -46,7 +45,6 @@ export default function LoginPage() {
     <div className="relative min-h-screen overflow-hidden flex flex-col items-center justify-center px-4 bg-[#f5f6fa]">
 
       <VantaBackground />
-
       <div className="absolute inset-0 bg-white/10 z-0" />
 
       <div className="relative z-10 w-full flex flex-col items-center">
@@ -70,7 +68,6 @@ export default function LoginPage() {
           transition={{ duration: 0.4, delay: 0.08 }}
           className="w-full max-w-sm bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden"
         >
-          {/* Card header */}
           <div className="px-7 pt-7 pb-5">
             <h1 className="text-xl font-bold text-slate-900">Welcome back</h1>
             <p className="text-sm text-slate-500 mt-1">Sign in to continue to your dashboard.</p>
@@ -78,10 +75,8 @@ export default function LoginPage() {
 
           <div className="h-px bg-slate-100 mx-7" />
 
-          {/* Form */}
           <form onSubmit={handleSubmit} className="px-7 py-6 space-y-4">
 
-            {/* Error */}
             {error && (
               <motion.div
                 initial={{ opacity: 0, y: -4 }}
@@ -92,11 +87,8 @@ export default function LoginPage() {
               </motion.div>
             )}
 
-            {/* Email */}
             <div className="space-y-1.5">
-              <label className="text-xs font-semibold text-slate-500 uppercase tracking-wide">
-                Email
-              </label>
+              <label className="text-xs font-semibold text-slate-500 uppercase tracking-wide">Email</label>
               <input
                 type="email"
                 autoComplete="email"
@@ -107,11 +99,8 @@ export default function LoginPage() {
               />
             </div>
 
-            {/* Password */}
             <div className="space-y-1.5">
-              <label className="text-xs font-semibold text-slate-500 uppercase tracking-wide">
-                Password
-              </label>
+              <label className="text-xs font-semibold text-slate-500 uppercase tracking-wide">Password</label>
               <div className="relative">
                 <input
                   type={showPass ? "text" : "password"}
@@ -131,33 +120,23 @@ export default function LoginPage() {
               </div>
             </div>
 
-            {/* Submit */}
             <motion.button
               whileTap={{ scale: 0.98 }}
               type="submit"
               disabled={loading}
               className="w-full flex items-center justify-center gap-2 rounded-xl bg-[#1e1b4b] hover:bg-[#2d2a6e] text-white text-sm font-semibold py-2.5 transition disabled:opacity-60 disabled:cursor-not-allowed mt-1"
             >
-              {loading ? (
-                <Loader2 size={16} className="animate-spin" />
-              ) : (
-                <>Login <ArrowRight size={15} /></>
-              )}
+              {loading ? <Loader2 size={16} className="animate-spin" /> : <>Login <ArrowRight size={15} /></>}
             </motion.button>
 
-            {/* Hint */}
             <p className="text-center text-xs text-slate-400 leading-relaxed pt-1">
               Use your Admin, Faculty, or Student account<br />to reach the correct dashboard.
             </p>
           </form>
 
-          {/* Footer */}
           <div className="flex items-center justify-between px-7 py-4 border-t border-slate-100 bg-slate-50/60">
             <span className="text-sm text-slate-400">New here?</span>
-            <a
-              href="/register"
-              className="text-sm font-semibold text-[#1e1b4b] hover:text-[#2d2a6e] transition"
-            >
+            <a href="/register" className="text-sm font-semibold text-[#1e1b4b] hover:text-[#2d2a6e] transition">
               Create account →
             </a>
           </div>

@@ -7,23 +7,16 @@ import { Eye, EyeOff, ArrowRight, Loader2 } from "lucide-react";
 import { apiPost } from "../lib/api";
 import VantaBackground from "../components/VantaBackground";
 
-// ✅ Only expose STUDENT and FACULTY for self-registration.
-// ADMIN accounts should only be created via /seed/admin or by another admin.
-// (Keeping ADMIN here is a security risk — anyone could register as admin)
 const ROLES = ["STUDENT", "FACULTY"];
+// ✅ ADMIN removed — security risk to allow self-registration as admin
 
 export default function RegisterPage() {
   const router = useRouter();
-  const [form, setForm] = useState({
-    name: "",
-    email: "",
-    password: "",
-    role: "STUDENT",
-  });
+  const [form, setForm] = useState({ name: "", email: "", password: "", role: "STUDENT" });
   const [showPass, setShowPass] = useState(false);
   const [loading, setLoading]   = useState(false);
   const [error, setError]       = useState("");
-  const [success, setSuccess]   = useState(false); // ✅ FIX: show success state
+  const [success, setSuccess]   = useState(false);
 
   function set(key, val) {
     setForm(f => ({ ...f, [key]: val }));
@@ -42,10 +35,8 @@ export default function RegisterPage() {
     setLoading(true);
     setError("");
     try {
-      // ✅ FIX: apiPost now correctly throws with server's error message (e.g. "Email already registered")
       await apiPost("/auth/register", form);
-
-      // ✅ FIX: Show success briefly, then redirect to login
+      // ✅ FIX: Show success then redirect (previously no feedback)
       setSuccess(true);
       setTimeout(() => router.push("/login"), 1200);
     } catch (err) {
@@ -59,7 +50,6 @@ export default function RegisterPage() {
     <div className="relative min-h-screen overflow-hidden flex flex-col items-center justify-center px-4 bg-[#f5f6fa]">
 
       <VantaBackground />
-
       <div className="absolute inset-0 bg-white/10 z-0" />
 
       <div className="relative z-10 w-full flex flex-col items-center">
@@ -83,7 +73,6 @@ export default function RegisterPage() {
           transition={{ duration: 0.4, delay: 0.08 }}
           className="w-full max-w-sm bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden"
         >
-          {/* Card header */}
           <div className="px-7 pt-7 pb-5">
             <h1 className="text-xl font-bold text-slate-900">Create account</h1>
             <p className="text-sm text-slate-500 mt-1">Join Pixelin to access your campus dashboard.</p>
@@ -91,10 +80,8 @@ export default function RegisterPage() {
 
           <div className="h-px bg-slate-100 mx-7" />
 
-          {/* Form */}
           <form onSubmit={handleSubmit} className="px-7 py-6 space-y-4">
 
-            {/* ✅ Success message */}
             {success && (
               <motion.div
                 initial={{ opacity: 0, y: -4 }}
@@ -105,7 +92,6 @@ export default function RegisterPage() {
               </motion.div>
             )}
 
-            {/* Error */}
             {error && (
               <motion.div
                 initial={{ opacity: 0, y: -4 }}
@@ -116,11 +102,8 @@ export default function RegisterPage() {
               </motion.div>
             )}
 
-            {/* Name */}
             <div className="space-y-1.5">
-              <label className="text-xs font-semibold text-slate-500 uppercase tracking-wide">
-                Full Name
-              </label>
+              <label className="text-xs font-semibold text-slate-500 uppercase tracking-wide">Full Name</label>
               <input
                 type="text"
                 autoComplete="name"
@@ -131,11 +114,8 @@ export default function RegisterPage() {
               />
             </div>
 
-            {/* Email */}
             <div className="space-y-1.5">
-              <label className="text-xs font-semibold text-slate-500 uppercase tracking-wide">
-                Email
-              </label>
+              <label className="text-xs font-semibold text-slate-500 uppercase tracking-wide">Email</label>
               <input
                 type="email"
                 autoComplete="email"
@@ -146,11 +126,8 @@ export default function RegisterPage() {
               />
             </div>
 
-            {/* Password */}
             <div className="space-y-1.5">
-              <label className="text-xs font-semibold text-slate-500 uppercase tracking-wide">
-                Password
-              </label>
+              <label className="text-xs font-semibold text-slate-500 uppercase tracking-wide">Password</label>
               <div className="relative">
                 <input
                   type={showPass ? "text" : "password"}
@@ -170,11 +147,8 @@ export default function RegisterPage() {
               </div>
             </div>
 
-            {/* Role */}
             <div className="space-y-1.5">
-              <label className="text-xs font-semibold text-slate-500 uppercase tracking-wide">
-                Role
-              </label>
+              <label className="text-xs font-semibold text-slate-500 uppercase tracking-wide">Role</label>
               <div className="grid grid-cols-2 gap-2">
                 {ROLES.map(r => (
                   <button
@@ -193,28 +167,19 @@ export default function RegisterPage() {
               </div>
             </div>
 
-            {/* Submit */}
             <motion.button
               whileTap={{ scale: 0.98 }}
               type="submit"
               disabled={loading || success}
               className="w-full flex items-center justify-center gap-2 rounded-xl bg-[#1e1b4b] hover:bg-[#2d2a6e] text-white text-sm font-semibold py-2.5 transition disabled:opacity-60 disabled:cursor-not-allowed mt-1"
             >
-              {loading ? (
-                <Loader2 size={16} className="animate-spin" />
-              ) : (
-                <>Create account <ArrowRight size={15} /></>
-              )}
+              {loading ? <Loader2 size={16} className="animate-spin" /> : <>Create account <ArrowRight size={15} /></>}
             </motion.button>
           </form>
 
-          {/* Footer */}
           <div className="flex items-center justify-between px-7 py-4 border-t border-slate-100 bg-slate-50/60">
             <span className="text-sm text-slate-400">Already have an account?</span>
-            <a
-              href="/login"
-              className="text-sm font-semibold text-[#1e1b4b] hover:text-[#2d2a6e] transition"
-            >
+            <a href="/login" className="text-sm font-semibold text-[#1e1b4b] hover:text-[#2d2a6e] transition">
               Sign in →
             </a>
           </div>

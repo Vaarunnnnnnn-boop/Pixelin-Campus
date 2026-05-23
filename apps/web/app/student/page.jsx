@@ -2,7 +2,6 @@
 
 import { useEffect, useState } from "react";
 import { motion } from "framer-motion";
-import { Building2, Users, BookOpen, Calendar } from "lucide-react";
 import { useMe } from "../lib/useMe";
 import AppShell from "../components/AppShell";
 import { apiGet } from "../lib/api";
@@ -10,19 +9,22 @@ import { Card, StatCard, InfoBox } from "../components/ui";
 
 export default function StudentHome() {
   const me = useMe();
-  const [buildings, setBuildings] = useState([]);
+  const [buildings, setBuildings]     = useState([]);
   const [departments, setDepartments] = useState([]);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading]         = useState(true);
 
   useEffect(() => {
     async function loadCampus() {
       try {
         const [b, d] = await Promise.all([
           apiGet("/infra/buildings"),
-apiGet("/infra/departments")
+          apiGet("/infra/departments"),
         ]);
-        setBuildings(b || []);
-        setDepartments(d || []);
+        // ✅ FIX: Backend returns { data: [...] } — unwrap .data
+        // Old code did setBuildings(b) which set buildings = { data: [...] }
+        // so buildings.length was undefined and .map() crashed
+        setBuildings(b?.data || []);
+        setDepartments(d?.data || []);
       } catch (err) {
         console.error("Failed to load campus info:", err);
       } finally {
@@ -32,35 +34,34 @@ apiGet("/infra/departments")
     if (me?.role === "STUDENT") loadCampus();
   }, [me]);
 
+  // undefined = still loading useMe
   if (me === undefined) return <div className="p-8">Loading...</div>;
+
+  // null = not logged in → redirect
   if (!me) {
     if (typeof window !== "undefined") window.location.href = "/login";
     return null;
   }
+
+  // wrong role
   if (me.role !== "STUDENT") return <div className="p-8">Forbidden</div>;
 
   return (
     <AppShell title="Student Dashboard">
-      <motion.div
-        initial={{ opacity: 0 }}
-        animate={{ opacity: 1 }}
-        className="space-y-8"
-      >
-        {/* Welcome */}
+      <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="space-y-8">
+
         <motion.div initial={{ opacity: 0, y: -10 }} animate={{ opacity: 1, y: 0 }}>
           <h1 className="text-3xl font-bold text-slate-900">Welcome, {me.name}!</h1>
           <p className="text-slate-600 mt-2">Here's your campus overview and schedule</p>
         </motion.div>
 
-        {/* Quick Stats */}
         <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="grid grid-cols-1 md:grid-cols-4 gap-4">
-          <StatCard label="Buildings" value={buildings.length} icon="🏢" color="blue" />
-          <StatCard label="Departments" value={departments.length} icon="📚" color="green" />
-          <StatCard label="My Timetable" value="—" icon="📅" color="purple" />
-          <StatCard label="Attendance" value="—" icon="✓" color="orange" />
+          <StatCard label="Buildings"   value={buildings.length}   icon="🏢" color="blue"   />
+          <StatCard label="Departments" value={departments.length} icon="📚" color="green"  />
+          <StatCard label="My Timetable" value="—"                 icon="📅" color="purple" />
+          <StatCard label="Attendance"   value="—"                 icon="✓"  color="orange" />
         </motion.div>
 
-        {/* Campus Information */}
         <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="space-y-4">
           <h2 className="text-2xl font-bold text-slate-900">Campus Information</h2>
 
@@ -83,7 +84,7 @@ apiGet("/infra/departments")
                     right={<div className="text-2xl">🏢</div>}
                   >
                     <div className="space-y-2">
-                      {building.departments && building.departments.length > 0 && (
+                      {building.departments?.length > 0 && (
                         <div>
                           <p className="text-xs font-bold text-slate-600 uppercase tracking-wide mb-2">Departments</p>
                           <div className="flex flex-wrap gap-2">
@@ -95,9 +96,11 @@ apiGet("/infra/departments")
                           </div>
                         </div>
                       )}
-                      {building.rooms && building.rooms.length > 0 && (
+                      {building.rooms?.length > 0 && (
                         <div>
-                          <p className="text-xs font-bold text-slate-600 uppercase tracking-wide mb-2">Classrooms: {building.rooms.length}</p>
+                          <p className="text-xs font-bold text-slate-600 uppercase tracking-wide mb-2">
+                            Classrooms: {building.rooms.length}
+                          </p>
                         </div>
                       )}
                     </div>
@@ -108,7 +111,6 @@ apiGet("/infra/departments")
           )}
         </motion.div>
 
-        {/* Quick Links */}
         <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="grid grid-cols-1 md:grid-cols-3 gap-4">
           <a href="/student/timetable">
             <Card title="My Timetable" description="View your class schedule">
@@ -126,6 +128,7 @@ apiGet("/infra/departments")
             </Card>
           </a>
         </motion.div>
+
       </motion.div>
     </AppShell>
   );
